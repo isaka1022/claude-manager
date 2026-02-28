@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -34,9 +34,19 @@ const registerIpcHandlers = (): void => {
       .map((entry) => join(resolvedDir, entry.name))
   })
 
+  ipcMain.handle('list-dir-entries', async (_, dir: string) => {
+    const resolvedDir = expandHomePath(dir)
+    const entries = await readdir(resolvedDir, { withFileTypes: true })
+    return entries.map((entry) => ({
+      name: entry.name,
+      isDirectory: entry.isDirectory(),
+      path: join(resolvedDir, entry.name),
+    }))
+  })
+
   ipcMain.handle('read-file', async (_, filePath: string) => {
     try {
-      return await readFile(filePath, 'utf-8')
+      return await readFile(expandHomePath(filePath), 'utf-8')
     } catch (err) {
       console.error('[read-file] failed:', filePath, err)
       return null
@@ -44,11 +54,12 @@ const registerIpcHandlers = (): void => {
   })
 
   ipcMain.handle('write-file', async (_, filePath: string, content: string) => {
-    if (!isPathWithin(filePath, claudeDir)) {
+    const resolvedPath = expandHomePath(filePath)
+    if (!isPathWithin(resolvedPath, claudeDir)) {
       throw new Error('Write access denied: only ~/.claude/ is writable')
     }
-    await mkdir(dirname(filePath), { recursive: true })
-    await writeFile(filePath, content, 'utf-8')
+    await mkdir(dirname(resolvedPath), { recursive: true })
+    await writeFile(resolvedPath, content, 'utf-8')
   })
 
   ipcMain.handle('read-meta', async (_, projectPath: string) => {
@@ -76,6 +87,33 @@ const registerIpcHandlers = (): void => {
     all[projectPath] = meta
     await mkdir(dirname(metaPath), { recursive: true })
     await writeFile(metaPath, JSON.stringify(all, null, 2), 'utf-8')
+  })
+
+  ipcMain.handle('read-config', async () => {
+    const configPath = join(claudeDir, 'claude-manager-config.json')
+    try {
+      const raw = await readFile(configPath, 'utf-8')
+      return JSON.parse(raw)
+    } catch {
+      return {}
+    }
+  })
+
+  ipcMain.handle('save-config', async (_, config: unknown) => {
+    const configPath = join(claudeDir, 'claude-manager-config.json')
+    await mkdir(dirname(configPath), { recursive: true })
+    await writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8')
+  })
+
+  ipcMain.handle('open-directory', async () => {
+    const win = BrowserWindow.getFocusedWindow()
+    const result = await dialog.showOpenDialog(win ?? new BrowserWindow(), {
+      properties: ['openDirectory'],
+    })
+    if (result.canceled || result.filePaths.length === 0) {
+      return null
+    }
+    return result.filePaths[0]
   })
 }
 

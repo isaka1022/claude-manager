@@ -16,13 +16,19 @@ type ProjectListItem = {
 
 type DetailTab = 'claude' | 'skills' | 'settings'
 
+type GlobalTab = 'claude' | 'settings'
+
 type SkillFile = {
   path: string
   name: string
   content: string
 }
 
-const PROJECTS_ROOT = '~/projects'
+type AppConfig = {
+  projectPaths: string[]
+}
+
+const CLAUDE_DIR = '~/.claude'
 
 const getProjectName = (projectPath: string): string => {
   const parts = projectPath.split(/[\\/]/).filter((part) => part.length > 0)
@@ -64,6 +70,20 @@ const normalizeMeta = (rawMeta: Record<string, unknown>): ProjectMeta => {
   return { status, memo }
 }
 
+const normalizeConfig = (rawConfig: unknown): AppConfig => {
+  if (rawConfig !== null && typeof rawConfig === 'object') {
+    const obj = rawConfig as Record<string, unknown>
+    if (Array.isArray(obj.projectPaths)) {
+      const paths = obj.projectPaths
+        .filter((p): p is string => typeof p === 'string')
+        .map((p) => p.trim())
+        .filter((p) => p.length > 0)
+      return { projectPaths: Array.from(new Set(paths)) }
+    }
+  }
+  return { projectPaths: [] }
+}
+
 const statusLabel: Record<ProjectStatus, string> = {
   active: 'active',
   archived: 'archived',
@@ -80,8 +100,10 @@ const App = () => {
   const [projects, setProjects] = useState<ProjectListItem[]>([])
   const [selectedProjectPath, setSelectedProjectPath] = useState<string | null>(null)
   const [nameFilter, setNameFilter] = useState('')
+  const [projectPaths, setProjectPaths] = useState<string[]>([])
   const [isLoadingProjects, setIsLoadingProjects] = useState(true)
   const [isSavingMeta, setIsSavingMeta] = useState(false)
+  const [isSavingConfig, setIsSavingConfig] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [activeDetailTab, setActiveDetailTab] = useState<DetailTab>('claude')
   const [isLoadingDetail, setIsLoadingDetail] = useState(false)
@@ -90,20 +112,23 @@ const App = () => {
   const [skillFiles, setSkillFiles] = useState<SkillFile[]>([])
   const [selectedSkillPath, setSelectedSkillPath] = useState<string | null>(null)
 
-  const loadProjects = useCallback(async () => {
+  // Global Settings state
+  const [activeGlobalTab, setActiveGlobalTab] = useState<GlobalTab>('claude')
+  const [globalClaudeMd, setGlobalClaudeMd] = useState<string | null>(null)
+  const [globalSettings, setGlobalSettings] = useState<string | null>(null)
+  const [isLoadingGlobal, setIsLoadingGlobal] = useState(false)
+
+  const loadProjectsFromPaths = useCallback(async (paths: string[]) => {
     setIsLoadingProjects(true)
     setErrorMessage(null)
     try {
-      const projectPaths = await window.api.scanProjects(PROJECTS_ROOT)
-      console.log('[scanProjects] first 3:', projectPaths.slice(0, 3))
       const loadedProjects = await Promise.all(
-        projectPaths.map(async (projectPath) => {
+        paths.map(async (projectPath) => {
           const claudePath = toClaudePath(projectPath)
           const [claudeMd, rawMeta] = await Promise.all([
             window.api.readFile(claudePath),
             window.api.readMeta(projectPath),
           ])
-
           return {
             path: projectPath,
             name: getProjectName(projectPath),
@@ -112,7 +137,6 @@ const App = () => {
           } satisfies ProjectListItem
         }),
       )
-
       loadedProjects.sort((left, right) => left.name.localeCompare(right.name))
       setProjects(loadedProjects)
       setSelectedProjectPath((current) => {
@@ -130,15 +154,51 @@ const App = () => {
     }
   }, [])
 
+  const loadGlobalFiles = useCallback(async () => {
+    setIsLoadingGlobal(true)
+    try {
+      const [claudeMd, settings] = await Promise.all([
+        window.api.readFile(`${CLAUDE_DIR}/CLAUDE.md`),
+        window.api.readFile(`${CLAUDE_DIR}/settings.json`),
+      ])
+      setGlobalClaudeMd(claudeMd)
+      setGlobalSettings(settings)
+    } catch (error) {
+      console.error('[loadGlobalFiles] failed:', error)
+    } finally {
+      setIsLoadingGlobal(false)
+    }
+  }, [])
+
   useEffect(() => {
-    void loadProjects()
-  }, [loadProjects])
+    let isCancelled = false
+
+    const initialize = async () => {
+      try {
+        const rawConfig = await window.api.readConfig()
+        const config = normalizeConfig(rawConfig)
+        if (isCancelled) return
+        setProjectPaths(config.projectPaths)
+        await loadProjectsFromPaths(config.projectPaths)
+      } catch (error) {
+        if (isCancelled) return
+        console.error('[readConfig] failed:', error)
+        setProjectPaths([])
+        await loadProjectsFromPaths([])
+      }
+    }
+
+    void initialize()
+    void loadGlobalFiles()
+
+    return () => {
+      isCancelled = true
+    }
+  }, [loadProjectsFromPaths, loadGlobalFiles])
 
   const filteredProjects = useMemo(() => {
     const query = nameFilter.trim().toLowerCase()
-    if (query.length === 0) {
-      return projects
-    }
+    if (query.length === 0) return projects
     return projects.filter((project) => project.name.toLowerCase().includes(query))
   }, [nameFilter, projects])
 
@@ -149,19 +209,11 @@ const App = () => {
 
   const handleMetaChange = useCallback(
     (nextMeta: Partial<ProjectMeta>) => {
-      if (selectedProjectPath === null) {
-        return
-      }
+      if (selectedProjectPath === null) return
       setProjects((current) =>
         current.map((project) =>
           project.path === selectedProjectPath
-            ? {
-                ...project,
-                meta: {
-                  ...project.meta,
-                  ...nextMeta,
-                },
-              }
+            ? { ...project, meta: { ...project.meta, ...nextMeta } }
             : project,
         ),
       )
@@ -170,9 +222,7 @@ const App = () => {
   )
 
   const handleSaveMeta = useCallback(async () => {
-    if (selectedProject === null) {
-      return
-    }
+    if (selectedProject === null) return
     setIsSavingMeta(true)
     try {
       await window.api.saveMeta(selectedProject.path, selectedProject.meta)
@@ -182,6 +232,48 @@ const App = () => {
       setIsSavingMeta(false)
     }
   }, [selectedProject])
+
+  const handleAddPath = useCallback(async () => {
+    const picked = await window.api.openDirectory()
+    if (picked === null) return
+
+    const nextPaths = projectPaths.includes(picked) ? projectPaths : [...projectPaths, picked]
+    setProjectPaths(nextPaths)
+
+    setIsSavingConfig(true)
+    setErrorMessage(null)
+    try {
+      await window.api.saveConfig({ projectPaths: nextPaths } satisfies AppConfig)
+      await loadProjectsFromPaths(nextPaths)
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Failed to save config.')
+    } finally {
+      setIsSavingConfig(false)
+    }
+  }, [projectPaths, loadProjectsFromPaths])
+
+  const handleRemovePath = useCallback(
+    async (targetPath: string) => {
+      const nextPaths = projectPaths.filter((p) => p !== targetPath)
+      setProjectPaths(nextPaths)
+
+      if (selectedProjectPath === targetPath) {
+        setSelectedProjectPath(null)
+      }
+
+      setIsSavingConfig(true)
+      setErrorMessage(null)
+      try {
+        await window.api.saveConfig({ projectPaths: nextPaths } satisfies AppConfig)
+        await loadProjectsFromPaths(nextPaths)
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : 'Failed to save config.')
+      } finally {
+        setIsSavingConfig(false)
+      }
+    },
+    [projectPaths, selectedProjectPath, loadProjectsFromPaths],
+  )
 
   useEffect(() => {
     let isCancelled = false
@@ -201,18 +293,14 @@ const App = () => {
       const projectPath = selectedProjectPath
       const skillsRootPath = toSkillsRootPath(projectPath)
 
-      const claudeFilePath = toClaudePath(projectPath)
-      console.log('[loadProjectDetail] projectPath:', projectPath)
-      console.log('[loadProjectDetail] claudeFilePath:', claudeFilePath)
       const [claudeResult, settingsResult, loadedSkills] = await Promise.all([
-        window.api.readFile(claudeFilePath),
+        window.api.readFile(toClaudePath(projectPath)),
         window.api.readFile(toSettingsPath(projectPath)),
         (async () => {
           try {
             const scannedPaths = await window.api.scanProjects(skillsRootPath)
-            const skillCandidates = Array.from(new Set(scannedPaths))
             const skills = await Promise.all(
-              skillCandidates.map(async (candidatePath) => {
+              Array.from(new Set(scannedPaths)).map(async (candidatePath) => {
                 const directContent = await window.api.readFile(candidatePath)
                 if (directContent !== null) {
                   return {
@@ -221,7 +309,6 @@ const App = () => {
                     content: directContent,
                   } satisfies SkillFile
                 }
-
                 const indexPath = `${candidatePath.replace(/[\\/]+$/, '')}/SKILL.md`
                 const indexContent = await window.api.readFile(indexPath)
                 if (indexContent !== null) {
@@ -231,11 +318,9 @@ const App = () => {
                     content: indexContent,
                   } satisfies SkillFile
                 }
-
                 return null
               }),
             )
-
             return skills
               .filter((skill): skill is SkillFile => skill !== null)
               .sort((left, right) => left.name.localeCompare(right.name))
@@ -245,9 +330,7 @@ const App = () => {
         })(),
       ])
 
-      if (isCancelled) {
-        return
-      }
+      if (isCancelled) return
 
       setClaudeMdContent(claudeResult)
       setSettingsContent(settingsResult)
@@ -274,20 +357,27 @@ const App = () => {
   )
 
   const settingsDisplayText = useMemo(() => {
-    if (settingsContent === null) {
-      return null
-    }
+    if (settingsContent === null) return null
     try {
-      const parsed = JSON.parse(settingsContent) as unknown
-      return JSON.stringify(parsed, null, 2)
+      return JSON.stringify(JSON.parse(settingsContent) as unknown, null, 2)
     } catch {
       return settingsContent
     }
   }, [settingsContent])
 
+  const globalSettingsDisplayText = useMemo(() => {
+    if (globalSettings === null) return null
+    try {
+      return JSON.stringify(JSON.parse(globalSettings) as unknown, null, 2)
+    } catch {
+      return globalSettings
+    }
+  }, [globalSettings])
+
   return (
     <div className="h-screen bg-slate-100 text-slate-900">
-      <div className="grid h-full grid-cols-[320px_1fr_320px]">
+      <div className="grid h-full grid-cols-[300px_1fr_320px]">
+        {/* Left: Project List */}
         <aside className="flex min-h-0 flex-col border-r border-slate-300/80 bg-gradient-to-b from-slate-100 to-slate-200/60 p-3 backdrop-blur-sm">
           <h1 className="mb-3 text-lg font-semibold tracking-tight">Projects</h1>
 
@@ -302,7 +392,11 @@ const App = () => {
             {isLoadingProjects ? (
               <p className="p-3 text-sm text-slate-500">Loading projects...</p>
             ) : filteredProjects.length === 0 ? (
-              <p className="p-3 text-sm text-slate-500">No projects found.</p>
+              <p className="p-3 text-sm text-slate-500">
+                {projectPaths.length === 0
+                  ? 'Add a project directory to get started.'
+                  : 'No projects found.'}
+              </p>
             ) : (
               <ul className="space-y-1">
                 {filteredProjects.map((project) => {
@@ -345,6 +439,7 @@ const App = () => {
             )}
           </div>
 
+          {/* Project Meta Editor */}
           <div className="mt-3 rounded-lg border border-slate-300/70 bg-white/80 p-3">
             <h2 className="mb-2 text-sm font-semibold text-slate-700">Selected Project</h2>
             {selectedProject === null ? (
@@ -357,9 +452,7 @@ const App = () => {
                   <select
                     value={selectedProject.meta.status}
                     onChange={(event) =>
-                      handleMetaChange({
-                        status: event.target.value as ProjectStatus,
-                      })
+                      handleMetaChange({ status: event.target.value as ProjectStatus })
                     }
                     className="w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs outline-none ring-sky-400/50 focus:ring-2"
                   >
@@ -372,24 +465,30 @@ const App = () => {
                   Memo
                   <textarea
                     value={selectedProject.meta.memo}
-                    onChange={(event) =>
-                      handleMetaChange({
-                        memo: event.target.value,
-                      })
-                    }
+                    onChange={(event) => handleMetaChange({ memo: event.target.value })}
                     rows={4}
                     className="mt-1 w-full resize-y rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs outline-none ring-sky-400/50 focus:ring-2"
                     placeholder="Write project memo..."
                   />
                 </label>
-                <button
-                  type="button"
-                  onClick={() => void handleSaveMeta()}
-                  disabled={isSavingMeta}
-                  className="rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-sky-400"
-                >
-                  {isSavingMeta ? 'Saving...' : 'Save Meta'}
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleSaveMeta()}
+                    disabled={isSavingMeta}
+                    className="flex-1 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-sky-400"
+                  >
+                    {isSavingMeta ? 'Saving...' : 'Save Meta'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleRemovePath(selectedProject.path)}
+                    disabled={isSavingConfig}
+                    className="rounded-md border border-rose-300 px-3 py-1.5 text-xs font-medium text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Remove
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -399,6 +498,7 @@ const App = () => {
           ) : null}
         </aside>
 
+        {/* Center: Project Detail */}
         <main className="flex min-h-0 flex-col border-r border-slate-300 bg-slate-50 p-6">
           {selectedProjectPath === null ? (
             <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white/60">
@@ -474,7 +574,6 @@ const App = () => {
                           )
                         })}
                       </ul>
-
                       <div className="min-h-0 overflow-auto rounded-md bg-slate-900 p-4">
                         {selectedSkillFile === null ? (
                           <p className="text-xs text-slate-300">Select a skill file</p>
@@ -498,9 +597,72 @@ const App = () => {
           )}
         </main>
 
-        <aside className="bg-white p-4">
+        {/* Right: Global Settings */}
+        <aside className="flex min-h-0 flex-col border-l border-slate-300/70 bg-white p-4">
           <h2 className="mb-3 text-lg font-semibold">Global Settings</h2>
-          <p className="text-sm text-slate-600">グローバル設定（SG3で実装）</p>
+
+          {/* Add Project */}
+          <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
+            <h3 className="mb-2 text-sm font-semibold text-slate-800">Add Project</h3>
+            <button
+              type="button"
+              onClick={() => void handleAddPath()}
+              disabled={isSavingConfig}
+              className="flex w-full items-center justify-center gap-2 rounded-md border border-dashed border-slate-300 bg-white px-3 py-3 text-xs font-medium text-slate-600 transition hover:border-sky-400 hover:bg-sky-50 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <span className="text-base leading-none">+</span>
+              {isSavingConfig ? 'Adding...' : 'Open Directory…'}
+            </button>
+          </div>
+
+          {/* Global Claude Files */}
+          <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-slate-200 bg-slate-50">
+            <div className="border-b border-slate-200 p-3">
+              <h3 className="text-sm font-semibold text-slate-800">~/.claude/</h3>
+              <nav className="mt-2 flex gap-1">
+                {([
+                  { id: 'claude', label: 'CLAUDE.md' },
+                  { id: 'settings', label: 'settings.json' },
+                ] as const).map((tab) => {
+                  const isActive = activeGlobalTab === tab.id
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setActiveGlobalTab(tab.id)}
+                      className={`rounded px-2 py-1 text-xs font-medium transition ${
+                        isActive
+                          ? 'bg-sky-100 text-sky-700'
+                          : 'text-slate-600 hover:bg-slate-200 hover:text-slate-900'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  )
+                })}
+              </nav>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-auto p-3">
+              {isLoadingGlobal ? (
+                <p className="text-xs text-slate-500">Loading...</p>
+              ) : activeGlobalTab === 'claude' ? (
+                globalClaudeMd === null ? (
+                  <p className="text-xs text-slate-500">~/.claude/CLAUDE.md not found</p>
+                ) : (
+                  <pre className="whitespace-pre-wrap break-words rounded-md bg-slate-900 p-3 font-mono text-[11px] leading-relaxed text-slate-100">
+                    {globalClaudeMd}
+                  </pre>
+                )
+              ) : globalSettingsDisplayText === null ? (
+                <p className="text-xs text-slate-500">~/.claude/settings.json not found</p>
+              ) : (
+                <pre className="whitespace-pre-wrap break-words rounded-md bg-slate-900 p-3 font-mono text-[11px] leading-relaxed text-slate-100">
+                  {globalSettingsDisplayText}
+                </pre>
+              )}
+            </div>
+          </div>
         </aside>
       </div>
     </div>
