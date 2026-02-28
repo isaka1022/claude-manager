@@ -47,8 +47,7 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle('read-file', async (_, filePath: string) => {
     try {
       return await readFile(expandHomePath(filePath), 'utf-8')
-    } catch (err) {
-      console.error('[read-file] failed:', filePath, err)
+    } catch {
       return null
     }
   })
