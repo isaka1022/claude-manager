@@ -1,11 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-type DirEntry = {
-  name: string
-  isDirectory: boolean
-  path: string
-}
-
 contextBridge.exposeInMainWorld('api', {
   scanProjects: (dir: string) => ipcRenderer.invoke('scan-projects', dir),
   listDirEntries: (dir: string) => ipcRenderer.invoke('list-dir-entries', dir),
@@ -16,4 +10,9 @@ contextBridge.exposeInMainWorld('api', {
   readConfig: () => ipcRenderer.invoke('read-config'),
   saveConfig: (config: unknown) => ipcRenderer.invoke('save-config', config),
   openDirectory: () => ipcRenderer.invoke('open-directory'),
+  openInEditor: (projectPath: string) => ipcRenderer.invoke('open-in-editor', projectPath),
+  getActiveProjects: () => ipcRenderer.invoke('get-active-projects'),
+  getUsage: () => ipcRenderer.invoke('get-usage'),
+  getProjectSessions: (projectPath: string) => ipcRenderer.invoke('get-project-sessions', projectPath),
+  claudeChat: (projectPath: string, message: string) => ipcRenderer.invoke('claude-chat', projectPath, message),
 })

@@ -1,7 +1,11 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { exec } from 'node:child_process'
+import { stat, readdir, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
+import { promisify } from 'node:util'
+
+const execAsync = promisify(exec)
 
 const claudeDir = resolve(join(homedir(), '.claude'))
 const metaPath = join(claudeDir, 'claude-manager-meta.json')
@@ -28,20 +32,28 @@ const expandHomePath = (targetPath: string): string => {
 const registerIpcHandlers = (): void => {
   ipcMain.handle('scan-projects', async (_, dir: string) => {
     const resolvedDir = expandHomePath(dir)
-    const entries = await readdir(resolvedDir, { withFileTypes: true })
-    return entries
-      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
-      .map((entry) => join(resolvedDir, entry.name))
+    try {
+      const entries = await readdir(resolvedDir, { withFileTypes: true })
+      return entries
+        .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+        .map((entry) => join(resolvedDir, entry.name))
+    } catch {
+      return []
+    }
   })
 
   ipcMain.handle('list-dir-entries', async (_, dir: string) => {
     const resolvedDir = expandHomePath(dir)
-    const entries = await readdir(resolvedDir, { withFileTypes: true })
-    return entries.map((entry) => ({
-      name: entry.name,
-      isDirectory: entry.isDirectory(),
-      path: join(resolvedDir, entry.name),
-    }))
+    try {
+      const entries = await readdir(resolvedDir, { withFileTypes: true })
+      return entries.map((entry) => ({
+        name: entry.name,
+        isDirectory: entry.isDirectory(),
+        path: join(resolvedDir, entry.name),
+      }))
+    } catch {
+      return []
+    }
   })
 
   ipcMain.handle('read-file', async (_, filePath: string) => {
@@ -113,6 +125,126 @@ const registerIpcHandlers = (): void => {
       return null
     }
     return result.filePaths[0]
+  })
+
+  ipcMain.handle('open-in-editor', async (_, projectPath: string) => {
+    await execAsync(`cursor "${projectPath}"`)
+  })
+
+  ipcMain.handle('get-active-projects', async () => {
+    const projectsDir = join(claudeDir, 'projects')
+    const now = Date.now()
+    const activeThresholdMs = 60 * 60 * 1000 // 1 hour
+    try {
+      const dirs = await readdir(projectsDir, { withFileTypes: true })
+      const active: string[] = []
+      for (const dir of dirs) {
+        if (!dir.isDirectory()) continue
+        const subEntries = await readdir(join(projectsDir, dir.name))
+        for (const file of subEntries) {
+          if (!file.endsWith('.jsonl')) continue
+          const fileStat = await stat(join(projectsDir, dir.name, file))
+          if (now - fileStat.mtimeMs < activeThresholdMs) {
+            // encode: leading '-' represents '/', then '-' -> '/'
+            const decoded = '/' + dir.name.slice(1).replace(/-/g, '/')
+            active.push(decoded)
+            break
+          }
+        }
+      }
+      return active
+    } catch {
+      return []
+    }
+  })
+
+  ipcMain.handle('get-project-sessions', async (_, projectPath: string) => {
+    // encode: /Users/amane/foo -> -Users-amane-foo
+    const encoded = projectPath.replace(/^\//, '-').replace(/\//g, '-')
+    const projectDir = join(claudeDir, 'projects', encoded)
+    try {
+      const files = await readdir(projectDir)
+      const jsonlFiles = files.filter((f) => f.endsWith('.jsonl'))
+      const sessions = await Promise.all(
+        jsonlFiles.map(async (file) => {
+          const filePath = join(projectDir, file)
+          const fileStat = await stat(filePath)
+          const sessionId = file.replace(/\.jsonl$/, '')
+
+          // Read file to extract first user text and last assistant text
+          const raw = await readFile(filePath, 'utf-8')
+          const lines = raw.trim().split('\n').filter((l) => l.trim().length > 0)
+
+          let firstUserText: string | null = null
+          let lastAssistantText: string | null = null
+          let lastUserText: string | null = null
+
+          for (const line of lines) {
+            try {
+              const entry = JSON.parse(line) as Record<string, unknown>
+              if (entry.type === 'user') {
+                const msg = entry.message as Record<string, unknown> | undefined
+                if (msg?.role === 'user' && Array.isArray(msg.content)) {
+                  for (const part of msg.content as Record<string, unknown>[]) {
+                    if (part.type === 'text' && typeof part.text === 'string' && part.text.trim().length > 0) {
+                      if (firstUserText === null) firstUserText = part.text.trim()
+                      lastUserText = part.text.trim()
+                      break
+                    }
+                  }
+                }
+              } else if (entry.type === 'assistant') {
+                const msg = entry.message as Record<string, unknown> | undefined
+                if (msg?.role === 'assistant' && Array.isArray(msg.content)) {
+                  for (const part of msg.content as Record<string, unknown>[]) {
+                    if (part.type === 'text' && typeof part.text === 'string' && part.text.trim().length > 0) {
+                      lastAssistantText = part.text.trim()
+                      break
+                    }
+                  }
+                }
+              }
+            } catch {
+              // skip malformed lines
+            }
+          }
+
+          return {
+            sessionId,
+            updatedAt: fileStat.mtimeMs,
+            firstUserText,
+            lastUserText,
+            lastAssistantText,
+          }
+        }),
+      )
+
+      return sessions.sort((a, b) => b.updatedAt - a.updatedAt)
+    } catch {
+      return []
+    }
+  })
+
+  ipcMain.handle('get-usage', async () => {
+    try {
+      const env = { ...process.env }
+      delete env.CLAUDECODE
+      const { stdout } = await execAsync('claude --print "/usage"', { env })
+      return stdout
+    } catch {
+      return null
+    }
+  })
+
+  ipcMain.handle('claude-chat', async (_, projectPath: string, message: string) => {
+    const env = { ...process.env }
+    delete env.CLAUDECODE
+    const escaped = message.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    const { stdout, stderr } = await execAsync(
+      `claude --print "${escaped}"`,
+      { cwd: projectPath, env, timeout: 120_000 },
+    )
+    return { output: stdout.trim(), error: stderr.trim() || null }
   })
 }
 
