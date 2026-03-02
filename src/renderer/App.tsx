@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
-type ProjectStatus = 'active' | 'archived' | 'unknown'
+type ProjectStatus = 'active' | 'archived' | 'unknown' | 'review'
 
 type ProjectMeta = {
   status: ProjectStatus
@@ -12,9 +12,10 @@ type ProjectListItem = {
   name: string
   hasClaudeMd: boolean
   meta: ProjectMeta
+  lastSessionAt: number | null
 }
 
-type DetailTab = 'claude' | 'skills' | 'settings'
+type DetailTab = 'claude' | 'skills' | 'settings' | 'conversations'
 
 type GlobalTab = 'overview' | 'skills' | 'mcp' | 'usage'
 
@@ -104,7 +105,7 @@ const getRelativePath = (basePath: string, targetPath: string): string => {
 
 const normalizeMeta = (rawMeta: Record<string, unknown>): ProjectMeta => {
   const status =
-    rawMeta.status === 'active' || rawMeta.status === 'archived' || rawMeta.status === 'unknown'
+    rawMeta.status === 'active' || rawMeta.status === 'archived' || rawMeta.status === 'unknown' || rawMeta.status === 'review'
       ? rawMeta.status
       : 'unknown'
   const memo = typeof rawMeta.memo === 'string' ? rawMeta.memo : ''
@@ -322,12 +323,14 @@ const statusLabel: Record<ProjectStatus, string> = {
   active: 'active',
   archived: 'archived',
   unknown: 'unknown',
+  review: 'review',
 }
 
 const statusBadgeClass: Record<ProjectStatus, string> = {
   active: 'bg-emerald-100 text-emerald-700',
   archived: 'bg-slate-200 text-slate-600',
   unknown: 'bg-amber-100 text-amber-700',
+  review: 'bg-purple-100 text-purple-700',
 }
 
 const App = () => {
@@ -339,12 +342,18 @@ const App = () => {
   const [isSavingMeta, setIsSavingMeta] = useState(false)
   const [isSavingConfig, setIsSavingConfig] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
-  const [activeDetailTab, setActiveDetailTab] = useState<DetailTab>('claude')
+  const [activeProjects, setActiveProjects] = useState<Set<string>>(new Set())
+  const [activeDetailTab, setActiveDetailTab] = useState<DetailTab>('conversations')
   const [isLoadingDetail, setIsLoadingDetail] = useState(false)
   const [claudeMdContent, setClaudeMdContent] = useState<string | null>(null)
   const [settingsContent, setSettingsContent] = useState<string | null>(null)
   const [skillFiles, setSkillFiles] = useState<SkillFile[]>([])
   const [selectedSkillPath, setSelectedSkillPath] = useState<string | null>(null)
+  const [sessions, setSessions] = useState<ProjectSession[]>([])
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
+  const [chatInput, setChatInput] = useState('')
+  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; text: string }[]>([])
+  const [isChatLoading, setIsChatLoading] = useState(false)
 
   // Global state
   const [activeGlobalTab, setActiveGlobalTab] = useState<GlobalTab>('overview')
@@ -365,19 +374,28 @@ const App = () => {
       const loadedProjects = await Promise.all(
         paths.map(async (projectPath) => {
           const claudePath = toClaudePath(projectPath)
-          const [claudeMd, rawMeta] = await Promise.all([
+          const [claudeMd, rawMeta, sessions] = await Promise.all([
             window.api.readFile(claudePath),
             window.api.readMeta(projectPath),
+            window.api.getProjectSessions(projectPath).catch(() => []),
           ])
           return {
             path: projectPath,
             name: getProjectName(projectPath),
             hasClaudeMd: claudeMd !== null,
             meta: normalizeMeta(rawMeta),
+            lastSessionAt: sessions[0]?.updatedAt ?? null,
           } satisfies ProjectListItem
         }),
       )
-      loadedProjects.sort((left, right) => left.name.localeCompare(right.name))
+      loadedProjects.sort((left, right) => {
+        if (left.lastSessionAt !== null && right.lastSessionAt !== null) {
+          return right.lastSessionAt - left.lastSessionAt
+        }
+        if (left.lastSessionAt !== null) return -1
+        if (right.lastSessionAt !== null) return 1
+        return left.name.localeCompare(right.name)
+      })
       setProjects(loadedProjects)
       setSelectedProjectPath((current) => {
         if (current !== null && loadedProjects.some((project) => project.path === current)) {
@@ -454,6 +472,11 @@ const App = () => {
     }
   }, [])
 
+  const refreshActiveProjects = useCallback(async () => {
+    const paths = await window.api.getActiveProjects()
+    setActiveProjects(new Set(paths))
+  }, [])
+
   useEffect(() => {
     let isCancelled = false
 
@@ -474,11 +497,17 @@ const App = () => {
 
     void initialize()
     void loadGlobalState()
+    void refreshActiveProjects()
+
+    const intervalId = setInterval(() => {
+      void refreshActiveProjects()
+    }, 30_000)
 
     return () => {
       isCancelled = true
+      clearInterval(intervalId)
     }
-  }, [loadProjectsFromPaths, loadGlobalState])
+  }, [loadProjectsFromPaths, loadGlobalState, refreshActiveProjects])
 
   const filteredProjects = useMemo(() => {
     const query = nameFilter.trim().toLowerCase()
@@ -516,6 +545,26 @@ const App = () => {
       setIsSavingMeta(false)
     }
   }, [selectedProject])
+
+  const handleSendChat = useCallback(async () => {
+    if (selectedProjectPath === null || chatInput.trim().length === 0 || isChatLoading) return
+    const message = chatInput.trim()
+    setChatInput('')
+    setChatMessages((prev) => [...prev, { role: 'user', text: message }])
+    setIsChatLoading(true)
+    try {
+      const result = await window.api.claudeChat(selectedProjectPath, message)
+      const responseText = result.error ? `[Error] ${result.error}` : result.output
+      setChatMessages((prev) => [...prev, { role: 'assistant', text: responseText }])
+    } catch (error) {
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'assistant', text: `[Error] ${error instanceof Error ? error.message : 'Unknown error'}` },
+      ])
+    } finally {
+      setIsChatLoading(false)
+    }
+  }, [selectedProjectPath, chatInput, isChatLoading])
 
   const handleAddPath = useCallback(async () => {
     const picked = await window.api.openDirectory()
@@ -566,15 +615,19 @@ const App = () => {
         setSettingsContent(null)
         setSkillFiles([])
         setSelectedSkillPath(null)
+        setSessions([])
+        setSelectedSessionId(null)
         return
       }
 
       setIsLoadingDetail(true)
+      setChatMessages([])
+      setChatInput('')
 
       const projectPath = selectedProjectPath
       const skillsRootPath = toSkillsRootPath(projectPath)
 
-      const [claudeResult, settingsResult, loadedSkills] = await Promise.all([
+      const [claudeResult, settingsResult, loadedSkills, loadedSessions] = await Promise.all([
         window.api.readFile(toClaudePath(projectPath)),
         window.api.readFile(toSettingsPath(projectPath)),
         (async () => {
@@ -609,6 +662,7 @@ const App = () => {
             return []
           }
         })(),
+        window.api.getProjectSessions(projectPath).catch(() => []),
       ])
 
       if (isCancelled) return
@@ -620,6 +674,8 @@ const App = () => {
         if (current !== null && loadedSkills.some((skill) => skill.path === current)) return current
         return loadedSkills[0]?.path ?? null
       })
+      setSessions(loadedSessions)
+      setSelectedSessionId(loadedSessions[0]?.sessionId ?? null)
       setIsLoadingDetail(false)
     }
 
@@ -652,7 +708,7 @@ const App = () => {
     <div className="h-screen bg-slate-100 text-slate-900">
       <div className="grid h-full grid-cols-[300px_1fr_340px]">
         {/* Left: Project List */}
-        <aside className="flex min-h-0 flex-col border-r border-slate-300/80 bg-gradient-to-b from-slate-100 to-slate-200/60 p-3 backdrop-blur-sm">
+        <aside className="flex min-h-0 flex-col border-r border-slate-300/80 bg-gradient-to-b from-slate-100 to-slate-200/60 p-3 pt-9 backdrop-blur-sm">
           <h1 className="mb-3 text-lg font-semibold tracking-tight">Projects</h1>
 
           <input
@@ -675,8 +731,9 @@ const App = () => {
               <ul className="space-y-1">
                 {filteredProjects.map((project) => {
                   const isSelected = project.path === selectedProjectPath
+                  const isActive = activeProjects.has(project.path)
                   return (
-                    <li key={project.path}>
+                    <li key={project.path} className="group">
                       <button
                         type="button"
                         onClick={() => setSelectedProjectPath(project.path)}
@@ -687,6 +744,12 @@ const App = () => {
                         }`}
                       >
                         <div className="mb-1 flex items-center gap-1.5">
+                          {isActive ? (
+                            <span
+                              className="h-2 w-2 shrink-0 rounded-full bg-emerald-400"
+                              title="Active session"
+                            />
+                          ) : null}
                           <span className="truncate text-sm font-medium">{project.name}</span>
                           {project.hasClaudeMd ? (
                             <span
@@ -696,6 +759,17 @@ const App = () => {
                               CLAUDE
                             </span>
                           ) : null}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              void window.api.openInEditor(project.path)
+                            }}
+                            className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10px] text-slate-400 opacity-0 transition hover:bg-slate-200 hover:text-slate-700 group-hover:opacity-100"
+                            title="Open in editor"
+                          >
+                            ↗
+                          </button>
                         </div>
                         <div className="flex items-center justify-between gap-2">
                           <span
@@ -732,6 +806,7 @@ const App = () => {
                   >
                     <option value="unknown">unknown</option>
                     <option value="active">active</option>
+                    <option value="review">review</option>
                     <option value="archived">archived</option>
                   </select>
                 </label>
@@ -773,7 +848,7 @@ const App = () => {
         </aside>
 
         {/* Center: Project Detail */}
-        <main className="flex min-h-0 flex-col border-r border-slate-300 bg-slate-50 p-6">
+        <main className="flex min-h-0 flex-col border-r border-slate-300 bg-slate-50 p-6 pt-9">
           {selectedProjectPath === null ? (
             <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white/60">
               <p className="text-base font-medium text-slate-500">Select a project</p>
@@ -789,6 +864,7 @@ const App = () => {
 
               <nav className="mb-4 flex items-center gap-2 border-b border-slate-300 pb-2">
                 {([
+                  { id: 'conversations', label: 'Conversations' },
                   { id: 'claude', label: 'CLAUDE.md' },
                   { id: 'skills', label: 'Skills' },
                   { id: 'settings', label: 'Settings' },
@@ -859,12 +935,131 @@ const App = () => {
                       </div>
                     </div>
                   )
-                ) : settingsDisplayText === null ? (
-                  <p className="text-sm text-slate-500">No settings.json found</p>
+                ) : activeDetailTab === 'settings' ? (
+                  settingsDisplayText === null ? (
+                    <p className="text-sm text-slate-500">No settings.json found</p>
+                  ) : (
+                    <pre className="h-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-900 p-4 font-mono text-xs text-slate-100">
+                      {settingsDisplayText}
+                    </pre>
+                  )
                 ) : (
-                  <pre className="h-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-900 p-4 font-mono text-xs text-slate-100">
-                    {settingsDisplayText}
-                  </pre>
+                  <div className="flex h-full min-h-0 flex-col gap-3">
+                    {/* Past sessions */}
+                    {sessions.length > 0 ? (
+                      <div className="grid min-h-0 flex-1 grid-cols-[240px_1fr] gap-3">
+                        {/* Session list */}
+                        <ul className="min-h-0 overflow-auto rounded-md border border-slate-200 bg-white">
+                          {sessions.map((session) => {
+                            const isSelected = selectedSessionId === session.sessionId
+                            const date = new Date(session.updatedAt)
+                            const dateStr = date.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' })
+                            const timeStr = date.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })
+                            const title = session.firstUserText ?? session.sessionId.slice(0, 8)
+                            return (
+                              <li key={session.sessionId}>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedSessionId(session.sessionId)}
+                                  className={`w-full border-b border-slate-100 px-3 py-2.5 text-left transition last:border-b-0 ${
+                                    isSelected ? 'bg-sky-50' : 'hover:bg-slate-50'
+                                  }`}
+                                >
+                                  <p className={`truncate text-xs font-medium ${isSelected ? 'text-sky-800' : 'text-slate-800'}`}>
+                                    {title.slice(0, 60)}
+                                  </p>
+                                  <p className="mt-0.5 text-[10px] text-slate-400">{dateStr} {timeStr}</p>
+                                </button>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                        {/* Session detail */}
+                        {(() => {
+                          const session = sessions.find((s) => s.sessionId === selectedSessionId)
+                          if (session === undefined) return <div />
+                          return (
+                            <div className="flex min-h-0 flex-col gap-2 overflow-auto">
+                              {session.lastUserText !== null ? (
+                                <div className="rounded-lg border border-slate-200 bg-white p-3">
+                                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">You</p>
+                                  <p className="whitespace-pre-wrap break-words text-xs text-slate-700">
+                                    {session.lastUserText}
+                                  </p>
+                                </div>
+                              ) : null}
+                              {session.lastAssistantText !== null ? (
+                                <div className="rounded-lg border border-sky-100 bg-sky-50 p-3">
+                                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-sky-400">Claude</p>
+                                  <p className="whitespace-pre-wrap break-words text-xs text-slate-700">
+                                    {session.lastAssistantText}
+                                  </p>
+                                </div>
+                              ) : null}
+                            </div>
+                          )
+                        })()}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-slate-500">No conversations found</p>
+                    )}
+                    {/* Chat input */}
+                    <div className="shrink-0 rounded-lg border border-slate-200 bg-white">
+                      {chatMessages.length > 0 ? (
+                        <div className="max-h-48 overflow-auto border-b border-slate-100 p-3">
+                          <div className="space-y-2">
+                            {chatMessages.map((msg, i) => (
+                              <div
+                                key={i}
+                                className={`rounded-md p-2.5 ${
+                                  msg.role === 'user'
+                                    ? 'bg-slate-100'
+                                    : 'border border-sky-100 bg-sky-50'
+                                }`}
+                              >
+                                <p className={`mb-1 text-[10px] font-semibold uppercase tracking-wide ${
+                                  msg.role === 'user' ? 'text-slate-400' : 'text-sky-400'
+                                }`}>
+                                  {msg.role === 'user' ? 'You' : 'Claude'}
+                                </p>
+                                <p className="whitespace-pre-wrap break-words text-xs text-slate-700">{msg.text}</p>
+                              </div>
+                            ))}
+                            {isChatLoading ? (
+                              <div className="rounded-md border border-sky-100 bg-sky-50 p-2.5">
+                                <p className="text-[10px] font-semibold uppercase tracking-wide text-sky-400">Claude</p>
+                                <p className="mt-1 text-xs text-slate-400">thinking…</p>
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                      ) : null}
+                      <div className="flex items-end gap-2 p-2">
+                        <textarea
+                          value={chatInput}
+                          onChange={(e) => setChatInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault()
+                              void handleSendChat()
+                            }
+                          }}
+                          placeholder="claude コマンドでメッセージを送信… (Enter で送信、Shift+Enter で改行)"
+                          rows={2}
+                          disabled={isChatLoading}
+                          className="min-h-0 flex-1 resize-none rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs outline-none ring-sky-400/50 transition focus:ring-2 disabled:opacity-50"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => void handleSendChat()}
+                          disabled={isChatLoading || chatInput.trim().length === 0}
+                          className="shrink-0 rounded-md bg-sky-600 px-3 py-2 text-xs font-medium text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-sky-400"
+                        >
+                          {isChatLoading ? '…' : '送信'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 )}
               </section>
             </>
@@ -874,7 +1069,7 @@ const App = () => {
         {/* Right: Global Claude State */}
         <aside className="flex min-h-0 flex-col border-l border-slate-300/70 bg-white">
           {/* Header + Add Project */}
-          <div className="border-b border-slate-200 p-3">
+          <div className="border-b border-slate-200 p-3 pt-9">
             <div className="mb-2 flex items-center justify-between">
               <h2 className="text-sm font-semibold text-slate-800">Global / ~/.claude</h2>
               <button
