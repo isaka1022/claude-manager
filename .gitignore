@@ -1,4 +1,17 @@
 node_modules/
 out/
 dist/
+release/
 *.png
+
+# Electron build artifacts
+Electron.app/
+LICENSES.chromium.html
+version
+
+# Project planning metadata
+Context/
+sublayers/
+context.yaml
+layer.yaml
+tasks.yaml

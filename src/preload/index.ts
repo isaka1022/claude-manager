@@ -15,4 +15,8 @@ contextBridge.exposeInMainWorld('api', {
   getUsage: () => ipcRenderer.invoke('get-usage'),
   getProjectSessions: (projectPath: string) => ipcRenderer.invoke('get-project-sessions', projectPath),
   claudeChat: (projectPath: string, message: string) => ipcRenderer.invoke('claude-chat', projectPath, message),
+  getHomePath: () => ipcRenderer.invoke('get-home-path'),
+  getTips: () => ipcRenderer.invoke('get-tips'),
+  saveTip: (tip: unknown) => ipcRenderer.invoke('save-tip', tip),
+  deleteTip: (tipId: string) => ipcRenderer.invoke('delete-tip', tipId),
 })

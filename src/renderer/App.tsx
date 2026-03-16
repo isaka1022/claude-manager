@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import TipsPanel from './TipsPanel'
 
 type ProjectStatus = 'active' | 'archived' | 'unknown' | 'review'
 
@@ -17,7 +18,7 @@ type ProjectListItem = {
 
 type DetailTab = 'claude' | 'skills' | 'settings' | 'conversations'
 
-type GlobalTab = 'overview' | 'skills' | 'mcp' | 'usage'
+type GlobalTab = 'overview' | 'skills' | 'mcp' | 'usage' | 'tips'
 
 type SkillFile = {
   path: string
@@ -366,6 +367,8 @@ const App = () => {
   })
   const [isLoadingGlobal, setIsLoadingGlobal] = useState(false)
   const [selectedGlobalSkillPath, setSelectedGlobalSkillPath] = useState<string | null>(null)
+  const [tips, setTips] = useState<Tip[]>([])
+  const [homePath, setHomePath] = useState<string | null>(null)
 
   const loadProjectsFromPaths = useCallback(async (paths: string[]) => {
     setIsLoadingProjects(true)
@@ -477,6 +480,34 @@ const App = () => {
     setActiveProjects(new Set(paths))
   }, [])
 
+  const loadTips = useCallback(async () => {
+    const loaded = await window.api.getTips()
+    setTips(loaded)
+  }, [])
+
+  const handleSaveTip = useCallback(async (tip: Tip) => {
+    await window.api.saveTip(tip)
+    await loadTips()
+  }, [loadTips])
+
+  const handleDeleteTip = useCallback(async (tipId: string) => {
+    await window.api.deleteTip(tipId)
+    await loadTips()
+  }, [loadTips])
+
+  const handlePromoteFile = useCallback(async (filePath: string, content: string) => {
+    await window.api.writeFile(filePath, content)
+    // Refresh global state so Overview/Skills tabs reflect the new file
+    void loadGlobalState()
+  }, [loadGlobalState])
+
+  const handleEvaluateTip = useCallback(async (input: string) => {
+    if (homePath === null) return ''
+    const result = await window.api.claudeChat(homePath, `/tips/evaluate ${input}`)
+    if (result.error !== null && result.output.length === 0) throw new Error(result.error)
+    return result.output
+  }, [homePath])
+
   useEffect(() => {
     let isCancelled = false
 
@@ -498,6 +529,8 @@ const App = () => {
     void initialize()
     void loadGlobalState()
     void refreshActiveProjects()
+    void loadTips()
+    void window.api.getHomePath().then(setHomePath)
 
     const intervalId = setInterval(() => {
       void refreshActiveProjects()
@@ -507,7 +540,7 @@ const App = () => {
       isCancelled = true
       clearInterval(intervalId)
     }
-  }, [loadProjectsFromPaths, loadGlobalState, refreshActiveProjects])
+  }, [loadProjectsFromPaths, loadGlobalState, refreshActiveProjects, loadTips])
 
   const filteredProjects = useMemo(() => {
     const query = nameFilter.trim().toLowerCase()
@@ -1100,6 +1133,7 @@ const App = () => {
               { id: 'skills', label: 'Skills' },
               { id: 'mcp', label: 'MCP' },
               { id: 'usage', label: 'Usage' },
+              { id: 'tips', label: 'Tips' },
             ] as const).map((tab) => {
               const isActive = activeGlobalTab === tab.id
               return (
@@ -1122,6 +1156,11 @@ const App = () => {
                   {tab.id === 'mcp' && globalState.mcpServers.length > 0 ? (
                     <span className="ml-1 rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] text-slate-600">
                       {globalState.mcpServers.length}
+                    </span>
+                  ) : null}
+                  {tab.id === 'tips' && tips.filter((t) => t.status === 'inbox').length > 0 ? (
+                    <span className="ml-1 rounded-full bg-amber-200 px-1.5 py-0.5 text-[10px] text-amber-700">
+                      {tips.filter((t) => t.status === 'inbox').length}
                     </span>
                   ) : null}
                 </button>
@@ -1266,6 +1305,16 @@ const App = () => {
                   ))
                 )}
               </div>
+            ) : activeGlobalTab === 'tips' ? (
+              <TipsPanel
+                tips={tips}
+                projects={projects.map((p) => ({ path: p.path, name: p.name }))}
+                onSaveTip={handleSaveTip}
+                onDeleteTip={handleDeleteTip}
+                onPromoteFile={handlePromoteFile}
+                onReadFile={(filePath) => window.api.readFile(filePath)}
+                onEvaluate={handleEvaluateTip}
+              />
             ) : (
               // Usage tab
               <UsagePanel stats={globalState.stats} />

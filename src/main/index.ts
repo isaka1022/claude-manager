@@ -9,6 +9,58 @@ const execAsync = promisify(exec)
 
 const claudeDir = resolve(join(homedir(), '.claude'))
 const metaPath = join(claudeDir, 'claude-manager-meta.json')
+const tipsPath = join(claudeDir, 'claude-manager-tips.json')
+
+type TipStatus = 'inbox' | 'trying' | 'accepted' | 'promoted' | 'rejected'
+type TipTargetType = 'rule' | 'skill' | 'claude-md' | 'permission' | 'none'
+
+type Tip = {
+  id: string
+  title: string
+  content: string
+  tags: string[]
+  status: TipStatus
+  targetType: TipTargetType
+  trialProjectPath: string | null
+  promotedPath: string | null
+  source: string
+  createdAt: number
+  updatedAt: number
+}
+
+const TIP_STATUSES: TipStatus[] = ['inbox', 'trying', 'accepted', 'promoted', 'rejected']
+const TIP_TARGET_TYPES: TipTargetType[] = ['rule', 'skill', 'claude-md', 'permission', 'none']
+
+const normalizeTip = (raw: Record<string, unknown>): Tip => ({
+  id: typeof raw.id === 'string' ? raw.id : crypto.randomUUID(),
+  title: typeof raw.title === 'string' ? raw.title : '',
+  content: typeof raw.content === 'string' ? raw.content : '',
+  tags: Array.isArray(raw.tags) ? raw.tags.filter((t): t is string => typeof t === 'string') : [],
+  status: TIP_STATUSES.includes(raw.status as TipStatus) ? (raw.status as TipStatus) : 'inbox',
+  targetType: TIP_TARGET_TYPES.includes(raw.targetType as TipTargetType) ? (raw.targetType as TipTargetType) : 'none',
+  trialProjectPath: typeof raw.trialProjectPath === 'string' ? raw.trialProjectPath :
+    (typeof raw.projectPath === 'string' ? (raw.projectPath as string) : null),
+  promotedPath: typeof raw.promotedPath === 'string' ? raw.promotedPath : null,
+  source: typeof raw.source === 'string' ? raw.source : 'manual',
+  createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : Date.now(),
+  updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
+})
+
+const readTips = async (): Promise<Tip[]> => {
+  try {
+    const raw = await readFile(tipsPath, 'utf-8')
+    const parsed = JSON.parse(raw) as unknown
+    if (Array.isArray(parsed)) return (parsed as Record<string, unknown>[]).map(normalizeTip)
+    return []
+  } catch {
+    return []
+  }
+}
+
+const writeTips = async (tips: Tip[]): Promise<void> => {
+  await mkdir(dirname(tipsPath), { recursive: true })
+  await writeFile(tipsPath, JSON.stringify(tips, null, 2), 'utf-8')
+}
 
 const isPathWithin = (targetPath: string, basePath: string): boolean => {
   const normalizedTarget = resolve(targetPath)
@@ -236,15 +288,44 @@ const registerIpcHandlers = (): void => {
     }
   })
 
+  ipcMain.handle('get-home-path', () => {
+    return homedir()
+  })
+
+  ipcMain.handle('get-tips', async () => {
+    return await readTips()
+  })
+
+  ipcMain.handle('save-tip', async (_, tip: Tip) => {
+    const tips = await readTips()
+    const idx = tips.findIndex((t) => t.id === tip.id)
+    if (idx >= 0) {
+      tips[idx] = { ...tip, updatedAt: Date.now() }
+    } else {
+      tips.unshift({ ...tip, createdAt: Date.now(), updatedAt: Date.now() })
+    }
+    await writeTips(tips)
+  })
+
+  ipcMain.handle('delete-tip', async (_, tipId: string) => {
+    const tips = await readTips()
+    await writeTips(tips.filter((t) => t.id !== tipId))
+  })
+
   ipcMain.handle('claude-chat', async (_, projectPath: string, message: string) => {
     const env = { ...process.env }
     delete env.CLAUDECODE
     const escaped = message.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-    const { stdout, stderr } = await execAsync(
-      `claude --print "${escaped}"`,
-      { cwd: projectPath, env, timeout: 120_000 },
-    )
-    return { output: stdout.trim(), error: stderr.trim() || null }
+    try {
+      const { stdout, stderr } = await execAsync(
+        `claude --print "${escaped}"`,
+        { cwd: projectPath, env, timeout: 120_000, maxBuffer: 10 * 1024 * 1024 },
+      )
+      return { output: stdout.trim(), error: stderr.trim() || null }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error'
+      return { output: '', error: msg }
+    }
   })
 }
 

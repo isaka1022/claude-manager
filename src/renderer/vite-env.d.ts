@@ -6,6 +6,23 @@ type DirEntry = {
   path: string
 }
 
+type TipStatus = 'inbox' | 'trying' | 'accepted' | 'promoted' | 'rejected'
+type TipTargetType = 'rule' | 'skill' | 'claude-md' | 'permission' | 'none'
+
+type Tip = {
+  id: string
+  title: string
+  content: string
+  tags: string[]
+  status: TipStatus
+  targetType: TipTargetType
+  trialProjectPath: string | null
+  promotedPath: string | null
+  source: string
+  createdAt: number
+  updatedAt: number
+}
+
 declare interface Window {
   api: {
     scanProjects: (dir: string) => Promise<string[]>
@@ -22,6 +39,10 @@ declare interface Window {
     getUsage: () => Promise<string | null>
     getProjectSessions: (projectPath: string) => Promise<ProjectSession[]>
     claudeChat: (projectPath: string, message: string) => Promise<{ output: string; error: string | null }>
+    getHomePath: () => Promise<string>
+    getTips: () => Promise<Tip[]>
+    saveTip: (tip: Tip) => Promise<void>
+    deleteTip: (tipId: string) => Promise<void>
   }
 }
 

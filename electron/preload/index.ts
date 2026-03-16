@@ -6,6 +6,23 @@ type DirEntry = {
   path: string
 }
 
+type TipStatus = 'inbox' | 'trying' | 'accepted' | 'promoted' | 'rejected'
+type TipTargetType = 'rule' | 'skill' | 'claude-md' | 'permission' | 'none'
+
+type Tip = {
+  id: string
+  title: string
+  content: string
+  tags: string[]
+  status: TipStatus
+  targetType: TipTargetType
+  trialProjectPath: string | null
+  promotedPath: string | null
+  source: string
+  createdAt: number
+  updatedAt: number
+}
+
 type ProjectSession = {
   sessionId: string
   updatedAt: number
@@ -29,6 +46,10 @@ contextBridge.exposeInMainWorld('api', {
   getUsage: () => ipcRenderer.invoke('get-usage'),
   getProjectSessions: (projectPath: string) => ipcRenderer.invoke('get-project-sessions', projectPath),
   claudeChat: (projectPath: string, message: string) => ipcRenderer.invoke('claude-chat', projectPath, message),
+  getHomePath: () => ipcRenderer.invoke('get-home-path'),
+  getTips: () => ipcRenderer.invoke('get-tips'),
+  saveTip: (tip: unknown) => ipcRenderer.invoke('save-tip', tip),
+  deleteTip: (tipId: string) => ipcRenderer.invoke('delete-tip', tipId),
 })
 
 declare global {
@@ -48,6 +69,10 @@ declare global {
       getUsage: () => Promise<string | null>
       getProjectSessions: (projectPath: string) => Promise<ProjectSession[]>
       claudeChat: (projectPath: string, message: string) => Promise<{ output: string; error: string | null }>
+      getHomePath: () => Promise<string>
+      getTips: () => Promise<Tip[]>
+      saveTip: (tip: Tip) => Promise<void>
+      deleteTip: (tipId: string) => Promise<void>
     }
   }
 }
